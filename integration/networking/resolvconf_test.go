@@ -212,3 +212,42 @@ func TestNslookupWindows(t *testing.T) {
 	// can only be changed in daemon.json using feature flag "windows-dns-proxy".
 	assert.Check(t, is.Contains(res.Stdout.String(), "Addresses:"))
 }
+
+func TestEmbeddedDNSWithRestartDaemon(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows", "No internal networks on Windows")
+	skip.If(t, testEnv.IsRootless, "Can't write an accessible dnsd.conf in rootless mode")
+	ctx := setupTest(t)
+
+	d := daemon.New(t, daemon.WithResolvConf(network.GenResolvConf("8.8.8.8")))
+	d.StartWithBusybox(ctx, t)
+	defer d.Stop(t)
+
+	c := d.NewClientT(t)
+	defer c.Close()
+
+	extNetName := "extnet"
+	network.CreateNoError(ctx, t, c, extNetName,
+		network.WithDriver("bridge"),
+	)
+	defer network.RemoveNoError(ctx, t, c, extNetName)
+
+	ctrName := "test-embedded-dns-with-restart-daemon"
+	id := container.Run(ctx, t, c,
+		container.WithNetworkMode(extNetName),
+		container.WithName(ctrName),
+	)
+	defer c.ContainerRemove(ctx, id, client.ContainerRemoveOptions{Force: true})
+
+	res, err := container.Exec(ctx, c, id, []string{"nslookup", "google.com"})
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal(res.ExitCode, 0))
+
+	d.Restart(t)
+
+	_, err = c.ContainerStart(ctx, id, client.ContainerStartOptions{})
+	assert.NilError(t, err)
+
+	res, err = container.Exec(ctx, c, id, []string{"nslookup", "google.com"})
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal(res.ExitCode, 0))
+}
